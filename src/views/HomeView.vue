@@ -4,6 +4,30 @@ import { useBadmintonStore } from '../stores/badminton.js'
 
 const store = useBadmintonStore()
 
+// --- Admin auth (shared with AdminView via sessionStorage) ---
+const isAdmin = ref(sessionStorage.getItem('bm_admin') === '1')
+const showPasswordModal = ref(false)
+const passwordInput = ref('')
+const passwordError = ref('')
+
+function submitPassword() {
+  if (passwordInput.value === store.settings.admin_password) {
+    sessionStorage.setItem('bm_admin', '1')
+    isAdmin.value = true
+    showPasswordModal.value = false
+    passwordInput.value = ''
+    passwordError.value = ''
+  } else {
+    passwordError.value = '密碼錯誤'
+  }
+}
+function logout() {
+  sessionStorage.removeItem('bm_admin')
+  isAdmin.value = false
+  manualSelected.value = []
+  preview.value = null
+}
+
 // --- Manual selection ---
 const manualSelected = ref([])
 function toggleManual(playerId) {
@@ -112,6 +136,28 @@ function formatWait(joinedAt) {
 </script>
 
 <template>
+  <!-- Password Modal -->
+  <div v-if="showPasswordModal"
+    class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center px-6"
+    @click.self="showPasswordModal = false">
+    <div class="bg-white rounded-2xl p-6 w-full max-w-xs shadow-xl">
+      <h3 class="font-semibold text-gray-800 mb-4 text-center">管理員登入</h3>
+      <input
+        v-model="passwordInput"
+        type="password"
+        placeholder="輸入密碼"
+        @keyup.enter="submitPassword"
+        class="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-blue-400 mb-2"
+        autofocus
+      />
+      <p v-if="passwordError" class="text-red-500 text-xs mb-2">{{ passwordError }}</p>
+      <button @click="submitPassword"
+        class="w-full py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition">
+        進入
+      </button>
+    </div>
+  </div>
+
   <!-- Loading -->
   <div v-if="store.loading" class="text-center text-gray-400 py-12 text-sm">載入中…</div>
 
@@ -160,7 +206,7 @@ function formatWait(joinedAt) {
           <div class="text-xs text-orange-400 font-medium mt-2 uppercase tracking-wider">B 隊</div>
         </div>
       </div>
-      <div class="px-4 pb-3">
+      <div v-if="isAdmin" class="px-4 pb-3">
         <button @click="store.endMatch(match.id)"
           class="w-full py-2 text-sm font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 transition">
           結束球局
@@ -169,20 +215,30 @@ function formatWait(joinedAt) {
     </div>
   </section>
 
-  <!-- Match Button -->
-  <div class="mb-4">
-    <button @click="handleGenerateMatch" :disabled="!store.canMatch"
-      class="w-full py-3.5 font-bold text-base rounded-xl transition"
-      :class="store.canMatch
-        ? 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white shadow-md'
-        : 'bg-gray-100 text-gray-400 cursor-not-allowed'">
-      {{ store.canMatch ? '開始配對' : store.availableCourts <= 0 ? '目前無空場地' : `需要至少 4 人排隊（目前 ${store.queue.length} 人）` }}
+  <!-- Match Button (admin only) / Admin toggle -->
+  <div class="mb-4 flex gap-2">
+    <template v-if="isAdmin">
+      <button @click="handleGenerateMatch" :disabled="!store.canMatch"
+        class="flex-1 py-3.5 font-bold text-base rounded-xl transition"
+        :class="store.canMatch
+          ? 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white shadow-md'
+          : 'bg-gray-100 text-gray-400 cursor-not-allowed'">
+        {{ store.canMatch ? '開始配對' : store.availableCourts <= 0 ? '目前無空場地' : `需要至少 4 人排隊（目前 ${store.queue.length} 人）` }}
+      </button>
+      <button @click="logout"
+        class="px-4 py-3.5 text-xs text-gray-400 border border-gray-200 rounded-xl hover:bg-gray-50 transition">
+        登出
+      </button>
+    </template>
+    <button v-else @click="showPasswordModal = true"
+      class="ml-auto text-xs text-gray-400 hover:text-gray-600 transition underline">
+      管理員登入
     </button>
-    <p v-if="previewError" class="text-red-500 text-sm text-center mt-2">{{ previewError }}</p>
   </div>
+  <p v-if="previewError" class="text-red-500 text-sm text-center -mt-2 mb-3">{{ previewError }}</p>
 
-  <!-- Match Preview -->
-  <div v-if="preview" class="mb-6 border-2 border-yellow-300 rounded-2xl overflow-hidden">
+  <!-- Match Preview (admin only) -->
+  <div v-if="isAdmin && preview" class="mb-6 border-2 border-yellow-300 rounded-2xl overflow-hidden">
     <div class="bg-yellow-50 px-4 py-2 flex items-center justify-between border-b border-yellow-200">
       <span class="font-semibold text-yellow-800 text-sm">配對預覽 — 場地 {{ preview.courtNumber }}</span>
       <span class="text-xs text-yellow-600">點選球員可換人</span>
@@ -277,26 +333,30 @@ function formatWait(joinedAt) {
     </div>
 
     <div v-for="(entry, index) in store.queue" :key="entry.id"
-      @click="toggleManual(entry.player_id)"
-      class="flex items-center rounded-xl shadow-sm border px-4 py-3 mb-2 cursor-pointer transition select-none"
-      :class="manualSelected.includes(entry.player_id)
-        ? 'bg-blue-50 border-blue-300'
-        : 'bg-white border-gray-100 hover:border-gray-300'">
+      @click="isAdmin && toggleManual(entry.player_id)"
+      class="flex items-center rounded-xl shadow-sm border px-4 py-3 mb-2 transition select-none"
+      :class="[
+        isAdmin ? 'cursor-pointer' : 'cursor-default',
+        isAdmin && manualSelected.includes(entry.player_id)
+          ? 'bg-blue-50 border-blue-300'
+          : 'bg-white border-gray-100',
+        isAdmin && !manualSelected.includes(entry.player_id) ? 'hover:border-gray-300' : ''
+      ]">
       <span class="w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center shrink-0 transition"
-        :class="manualSelected.includes(entry.player_id) ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-400'">
-        {{ manualSelected.includes(entry.player_id) ? manualSelected.indexOf(entry.player_id) + 1 : index + 1 }}
+        :class="isAdmin && manualSelected.includes(entry.player_id) ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-400'">
+        {{ isAdmin && manualSelected.includes(entry.player_id) ? manualSelected.indexOf(entry.player_id) + 1 : index + 1 }}
       </span>
       <span class="flex-1 font-semibold text-gray-800 ml-2">{{ playerName(entry.player_id) }}</span>
       <span class="text-xs text-gray-400 mr-3">{{ entry.session_games_played }} 場</span>
       <span class="text-xs text-gray-400 mr-2">{{ formatWait(entry.joined_at) }}</span>
-      <button @click.stop="store.dequeue(entry.player_id)"
+      <button v-if="isAdmin" @click.stop="store.dequeue(entry.player_id)"
         class="text-gray-300 hover:text-red-400 transition text-lg leading-none ml-1" title="移除排隊">
         ×
       </button>
     </div>
 
-    <!-- Manual start -->
-    <div v-if="manualSelected.length > 0" class="mt-3">
+    <!-- Manual start (admin only) -->
+    <div v-if="isAdmin && manualSelected.length > 0" class="mt-3">
       <div v-if="manualSelected.length === 4" class="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-2 text-sm text-blue-700">
         A 隊：{{ playerName(manualSelected[0]) }} & {{ playerName(manualSelected[1]) }}<br>
         B 隊：{{ playerName(manualSelected[2]) }} & {{ playerName(manualSelected[3]) }}

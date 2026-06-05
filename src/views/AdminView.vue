@@ -24,31 +24,32 @@ function logout() {
 
 // Add player
 const newPlayerName = ref('')
-function addPlayer() {
+async function addPlayer() {
   const name = newPlayerName.value.trim()
   if (!name) return
-  store.addPlayer(name)
+  await store.addPlayer(name)
   newPlayerName.value = ''
 }
 
 // Batch import
 const batchText = ref('')
 const batchResult = ref('')
-function batchImport() {
+const batchLoading = ref(false)
+async function batchImport() {
+  batchLoading.value = true
   const lines = batchText.value.split('\n')
-  let added = 0
+  const toAdd = []
   let skipped = 0
   for (const line of lines) {
-    // Strip leading number with optional dot/dot-space, e.g. "1 N", "1. N", "12. ting-yun1"
     const name = line.replace(/^\d+\.?\s*/, '').trim()
     if (!name) continue
-    const exists = store.players.some(p => p.name === name)
-    if (exists) { skipped++; continue }
-    store.addPlayer(name)
-    added++
+    if (store.players.some(p => p.name === name)) { skipped++; continue }
+    toAdd.push(name)
   }
-  batchResult.value = `新增 ${added} 人${skipped ? `，${skipped} 人已存在略過` : ''}`
+  await Promise.all(toAdd.map(name => store.addPlayer(name)))
+  batchResult.value = `新增 ${toAdd.length} 人${skipped ? `，${skipped} 人已存在略過` : ''}`
   batchText.value = ''
+  batchLoading.value = false
 }
 const showBatch = ref(false)
 
@@ -159,10 +160,10 @@ const tab = ref('players')
         <div class="flex gap-2 mt-2 items-center">
           <button
             @click="batchImport"
-            :disabled="!batchText.trim()"
+            :disabled="!batchText.trim() || batchLoading"
             class="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 transition disabled:bg-gray-200 disabled:text-gray-400"
           >
-            匯入
+            {{ batchLoading ? '匯入中…' : '匯入' }}
           </button>
           <span v-if="batchResult" class="text-sm text-green-600">{{ batchResult }}</span>
         </div>
