@@ -1,7 +1,15 @@
 <script setup>
 import { RouterView, RouterLink, useRoute } from 'vue-router'
+import { onMounted } from 'vue'
+import { useBadmintonStore } from './stores/badminton.js'
 
 const route = useRoute()
+const store = useBadmintonStore()
+
+onMounted(async () => {
+  await store.loadAll()
+  store.subscribeRealtime()
+})
 </script>
 
 <template>

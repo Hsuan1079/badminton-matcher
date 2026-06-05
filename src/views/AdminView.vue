@@ -4,6 +4,24 @@ import { useBadmintonStore } from '../stores/badminton.js'
 
 const store = useBadmintonStore()
 
+// --- Admin auth ---
+const isAuthed = ref(sessionStorage.getItem('bm_admin') === '1')
+const passwordInput = ref('')
+const passwordError = ref('')
+function submitPassword() {
+  if (passwordInput.value === store.settings.admin_password) {
+    sessionStorage.setItem('bm_admin', '1')
+    isAuthed.value = true
+    passwordError.value = ''
+  } else {
+    passwordError.value = '密碼錯誤'
+  }
+}
+function logout() {
+  sessionStorage.removeItem('bm_admin')
+  isAuthed.value = false
+}
+
 // Add player
 const newPlayerName = ref('')
 function addPlayer() {
@@ -67,6 +85,27 @@ const tab = ref('players')
 </script>
 
 <template>
+  <!-- Password gate -->
+  <div v-if="!isAuthed" class="flex flex-col items-center justify-center min-h-[60vh] gap-4">
+    <div class="text-2xl">🔒</div>
+    <h2 class="text-lg font-semibold text-gray-700">管理員登入</h2>
+    <div class="w-full max-w-xs">
+      <input
+        v-model="passwordInput"
+        type="password"
+        placeholder="輸入密碼"
+        @keyup.enter="submitPassword"
+        class="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-blue-400 mb-2"
+      />
+      <p v-if="passwordError" class="text-red-500 text-xs mb-2">{{ passwordError }}</p>
+      <button @click="submitPassword"
+        class="w-full py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition">
+        進入
+      </button>
+    </div>
+  </div>
+
+  <template v-else>
   <!-- Tabs -->
   <div class="flex bg-white rounded-xl shadow-sm border border-gray-100 mb-6 overflow-hidden">
     <button
@@ -215,8 +254,8 @@ const tab = ref('players')
       class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 mb-3"
     >
       <div class="flex justify-between text-xs text-gray-400 mb-2">
-        <span>場地 {{ match.courtNumber }}</span>
-        <span>{{ formatTime(match.startedAt) }} – {{ formatTime(match.endedAt) }}</span>
+        <span>場地 {{ match.court_number }}</span>
+        <span>{{ formatTime(match.started_at) }} – {{ formatTime(match.ended_at) }}</span>
       </div>
       <div class="flex items-center gap-3">
         <div class="flex-1 text-center">
@@ -255,5 +294,28 @@ const tab = ref('players')
       </div>
     </div>
 
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
+      <label class="block text-sm font-medium text-gray-700 mb-1">管理員密碼</label>
+      <div class="flex gap-2 items-center mt-2">
+        <input
+          v-model="store.settings.admin_password"
+          type="text"
+          class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+        />
+        <button
+          @click="store.updateSettings({ admin_password: store.settings.admin_password })"
+          class="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition"
+        >
+          儲存
+        </button>
+      </div>
+    </div>
+
+    <button @click="logout"
+      class="mt-4 w-full py-2.5 text-sm text-gray-500 border border-gray-200 rounded-xl hover:bg-gray-50 transition">
+      登出管理員
+    </button>
   </section>
+
+  </template>
 </template>
