@@ -29,6 +29,14 @@ export const useBadmintonStore = defineStore('badminton', () => {
     return players.value.find(p => p.id === id)
   }
 
+  // Local (browser timezone) date string, e.g. "2026-06-12"
+  function localDateString(date) {
+    const y = date.getFullYear()
+    const m = String(date.getMonth() + 1).padStart(2, '0')
+    const d = String(date.getDate()).padStart(2, '0')
+    return `${y}-${m}-${d}`
+  }
+
   // --- Load initial data ---
   async function loadAll() {
     loading.value = true
@@ -63,54 +71,102 @@ export const useBadmintonStore = defineStore('badminton', () => {
       .subscribe()
   }
 
+  const addingNames = new Set()
+
   // --- Player actions ---
   async function addPlayer(name) {
     const trimmed = name.trim()
     if (!trimmed) return null
-    const { data, error } = await supabase.from('players').insert({ name: trimmed }).select().single()
-    if (error) { console.error(error); return null }
-    return data
+    if (addingNames.has(trimmed)) return null
+    addingNames.add(trimmed)
+    try {
+      const { data, error } = await supabase.from('players').insert({ name: trimmed }).select().single()
+      if (error) { console.error(error); return null }
+      return data
+    } finally {
+      addingNames.delete(trimmed)
+    }
   }
 
   async function removePlayer(playerId) {
-    await supabase.from('players').delete().eq('id', playerId)
+    const inActiveMatch = activeMatches.value.some(m =>
+      m.team1.includes(playerId) || m.team2.includes(playerId)
+    )
+    if (inActiveMatch) {
+      console.error('removePlayer: cannot remove a player who is in an active match')
+      return false
+    }
+    // Leave the queue first so no dangling queue row remains for this player
+    if (isInQueue(playerId)) await dequeue(playerId)
+    const { error } = await supabase.from('players').delete().eq('id', playerId)
+    if (error) { console.error(error); return false }
+    return true
   }
+
+  // In-flight enqueue locks: prevents double-insert when the button is
+  // pressed faster than the realtime update arrives.
+  const enqueuingSet = new Set()
 
   // --- Queue actions ---
   async function enqueue(playerId) {
     if (queue.value.some(e => e.player_id === playerId)) return false
-    const today = new Date().toISOString().slice(0, 10)
-    // Count today's finished games for this player
-    const gamesPlayed = matches.value.filter(m =>
-      m.ended_at !== null &&
-      new Date(m.started_at).toISOString().slice(0, 10) === today &&
-      (m.team1.includes(playerId) || m.team2.includes(playerId))
-    ).length
-    await supabase.from('queue').insert({ player_id: playerId, session_games_played: gamesPlayed })
-    return true
+    if (enqueuingSet.has(playerId)) return false
+    enqueuingSet.add(playerId)
+    try {
+      const today = localDateString(new Date())
+      const gamesPlayed = matches.value.filter(m =>
+        m.ended_at !== null &&
+        localDateString(new Date(m.started_at)) === today &&
+        (m.team1.includes(playerId) || m.team2.includes(playerId))
+      ).length
+      const { error } = await supabase.from('queue').insert({ player_id: playerId, session_games_played: gamesPlayed })
+      if (error) { console.error(error); return false }
+      return true
+    } finally {
+      enqueuingSet.delete(playerId)
+    }
   }
 
   async function dequeue(playerId) {
-    await supabase.from('queue').delete().eq('player_id', playerId)
+    const { error } = await supabase.from('queue').delete().eq('player_id', playerId)
+    if (error) { console.error(error); return false }
+    return true
   }
 
   function isInQueue(playerId) {
     return queue.value.some(e => e.player_id === playerId)
   }
 
+  // Admin override for a queued player's recorded game count (e.g. fixing a mis-click)
+  async function updateQueueGamesPlayed(playerId, sessionGamesPlayed) {
+    const value = Math.max(0, Math.trunc(sessionGamesPlayed))
+    const { error } = await supabase.from('queue').update({ session_games_played: value }).eq('player_id', playerId)
+    if (error) { console.error(error); return false }
+    return true
+  }
+
   // --- Match actions ---
   async function startMatch(team1, team2, courtNumber) {
-    const { data: match } = await supabase.from('matches').insert({
+    // Guard against double-booking: players already in an active match cannot start another
+    const busy = new Set(activeMatches.value.flatMap(m => [...m.team1, ...m.team2]))
+    if ([...team1, ...team2].some(id => busy.has(id))) {
+      console.error('startMatch: player already in an active match')
+      return null
+    }
+
+    const { data: match, error } = await supabase.from('matches').insert({
       team1,
       team2,
       court_number: courtNumber,
       ended_at: null,
     }).select().single()
+    if (error) { console.error(error); return null }
 
     // Remove players from queue
-    await Promise.all([...team1, ...team2].map(id =>
+    const results = await Promise.all([...team1, ...team2].map(id =>
       supabase.from('queue').delete().eq('player_id', id)
     ))
+    results.forEach(({ error }) => { if (error) console.error(error) })
     return match
   }
 
@@ -118,26 +174,68 @@ export const useBadmintonStore = defineStore('badminton', () => {
     const match = matches.value.find(m => m.id === matchId)
     if (!match) return
 
-    const today = new Date().toISOString().slice(0, 10)
+    const today = localDateString(new Date())
     // Calculate games BEFORE marking ended
     const gamesMap = {}
     ;[...match.team1, ...match.team2].forEach(playerId => {
       gamesMap[playerId] = matches.value.filter(m =>
         m.ended_at !== null &&
-        new Date(m.started_at).toISOString().slice(0, 10) === today &&
+        localDateString(new Date(m.started_at)) === today &&
         (m.team1.includes(playerId) || m.team2.includes(playerId))
       ).length + 1
     })
 
-    await supabase.from('matches').update({ ended_at: new Date().toISOString() }).eq('id', matchId)
+    const { error: updateError } = await supabase.from('matches').update({ ended_at: new Date().toISOString() }).eq('id', matchId)
+    if (updateError) { console.error(updateError); return }
 
-    // Re-enqueue players
-    await Promise.all([...match.team1, ...match.team2].map(playerId =>
+    // Re-enqueue players in parallel
+    const results = await Promise.all([...match.team1, ...match.team2].map(playerId =>
       supabase.from('queue').insert({
         player_id: playerId,
         session_games_played: gamesMap[playerId],
       })
     ))
+    results.forEach(({ error }) => { if (error) console.error(error) })
+  }
+
+  // Cancel an active match entirely (e.g. started by mistake), returning all
+  // 4 players back to the queue as if it never happened.
+  async function cancelMatch(matchId) {
+    const match = matches.value.find(m => m.id === matchId && m.ended_at === null)
+    if (!match) return false
+
+    const { error: deleteError } = await supabase.from('matches').delete().eq('id', matchId)
+    if (deleteError) { console.error(deleteError); return false }
+
+    const results = await Promise.all([...match.team1, ...match.team2].map(playerId => enqueue(playerId)))
+    if (results.some(ok => !ok)) return false
+    return true
+  }
+
+  // Swap one player in an active match for another player currently in the queue.
+  async function swapActiveMatchPlayer(matchId, outPlayerId, inPlayerId) {
+    const match = matches.value.find(m => m.id === matchId && m.ended_at === null)
+    if (!match) return false
+    if (!isInQueue(inPlayerId)) return false
+
+    let team1 = match.team1
+    let team2 = match.team2
+    if (team1.includes(outPlayerId)) {
+      team1 = team1.map(id => id === outPlayerId ? inPlayerId : id)
+    } else if (team2.includes(outPlayerId)) {
+      team2 = team2.map(id => id === outPlayerId ? inPlayerId : id)
+    } else {
+      return false
+    }
+
+    const { error: updateError } = await supabase.from('matches').update({ team1, team2 }).eq('id', matchId)
+    if (updateError) { console.error(updateError); return false }
+
+    const { error: deleteError } = await supabase.from('queue').delete().eq('player_id', inPlayerId)
+    if (deleteError) console.error(deleteError)
+
+    await enqueue(outPlayerId)
+    return true
   }
 
   async function startManualMatch(team1, team2) {
@@ -149,24 +247,24 @@ export const useBadmintonStore = defineStore('badminton', () => {
 
   // --- Settings ---
   async function updateSettings(newSettings) {
+    const previous = settings.value
     settings.value = { ...settings.value, ...newSettings }
-    await supabase.from('settings').update(newSettings).eq('id', 1)
+    const { error } = await supabase.from('settings').update(newSettings).eq('id', 1)
+    if (error) {
+      console.error(error)
+      settings.value = previous
+      return false
+    }
+    return true
   }
 
   // --- Matching algorithm ---
   function generateMatch() {
     if (availableCourts.value <= 0) return { error: '目前無空場地' }
     if (queue.value.length < 4) return { error: '排隊人數不足（需要至少 4 人）' }
+    if (candidatePool.value.length < 4) return { error: '候選人數不足' }
 
-    const candidates = [...candidatePool.value].sort((a, b) => {
-      if (a.session_games_played !== b.session_games_played)
-        return a.session_games_played - b.session_games_played
-      return new Date(a.joined_at) - new Date(b.joined_at)
-    })
-
-    const selected = selectFour(candidates)
-    if (!selected) return { error: '候選人數不足' }
-
+    const selected = shuffle(candidatePool.value.map(e => e.player_id)).slice(0, 4)
     const { team1, team2 } = splitTeams(selected)
 
     const usedCourts = new Set(activeMatches.value.map(m => m.court_number))
@@ -185,32 +283,6 @@ export const useBadmintonStore = defineStore('badminton', () => {
     return a
   }
 
-  function selectFour(candidates) {
-    if (candidates.length < 4) return null
-    if (candidates.length === 4) return shuffle(candidates.map(e => e.player_id))
-
-    const combos = combinations(candidates, 4)
-    let bestScore = -1
-    const tied = []
-
-    for (const combo of combos) {
-      const ids = combo.map(e => e.player_id)
-      const score = freshnessScore(ids)
-      if (score > bestScore) {
-        bestScore = score
-        tied.length = 0
-        tied.push({ ids, combo })
-      } else if (Math.abs(score - bestScore) < 0.001) {
-        tied.push({ ids, combo })
-      }
-    }
-
-    const picked = tied.length === 1
-      ? tied[0]
-      : tied[Math.floor(Math.random() * tied.length)]
-    return shuffle(picked.ids)
-  }
-
   function getCourtHistory(playerId) {
     const counts = new Map()
     for (const m of matches.value) {
@@ -222,17 +294,6 @@ export const useBadmintonStore = defineStore('badminton', () => {
       })
     }
     return counts
-  }
-
-  function freshnessScore(playerIds) {
-    let score = 0
-    for (let i = 0; i < playerIds.length; i++) {
-      const history = getCourtHistory(playerIds[i])
-      for (let j = i + 1; j < playerIds.length; j++) {
-        score += 1 / (1 + (history.get(playerIds[j]) ?? 0))
-      }
-    }
-    return score
   }
 
   function splitTeams(playerIds) {
@@ -267,27 +328,13 @@ export const useBadmintonStore = defineStore('badminton', () => {
     return best
   }
 
-  function combinations(arr, k) {
-    const result = []
-    function helper(start, current) {
-      if (current.length === k) { result.push([...current]); return }
-      for (let i = start; i < arr.length; i++) {
-        current.push(arr[i])
-        helper(i + 1, current)
-        current.pop()
-      }
-    }
-    helper(0, [])
-    return result
-  }
-
   return {
     players, queue, matches, settings, loading,
     activeMatches, finishedMatches, activeCourts, availableCourts, candidatePool, canMatch,
     getPlayer, loadAll, subscribeRealtime,
     addPlayer, removePlayer,
-    enqueue, dequeue, isInQueue,
-    startMatch, endMatch, startManualMatch,
+    enqueue, dequeue, isInQueue, updateQueueGamesPlayed,
+    startMatch, endMatch, cancelMatch, swapActiveMatchPlayer, startManualMatch,
     generateMatch, updateSettings,
   }
 })

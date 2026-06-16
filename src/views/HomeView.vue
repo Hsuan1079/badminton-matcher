@@ -123,6 +123,34 @@ const swapCandidates = computed(() => {
   return store.queue.filter(e => !inPreview.has(e.player_id))
 })
 
+// --- Active match: swap player / cancel match ---
+const activeSwapping = ref(null) // { matchId, playerId } | null
+
+function toggleActiveSwap(matchId, playerId) {
+  if (activeSwapping.value?.matchId === matchId && activeSwapping.value?.playerId === playerId) {
+    activeSwapping.value = null
+  } else {
+    activeSwapping.value = { matchId, playerId }
+  }
+}
+
+function isActiveSwapping(matchId, playerId) {
+  return activeSwapping.value?.matchId === matchId && activeSwapping.value?.playerId === playerId
+}
+
+async function swapActivePlayer(matchId, inPlayerId) {
+  if (!activeSwapping.value || activeSwapping.value.matchId !== matchId) return
+  await store.swapActiveMatchPlayer(matchId, activeSwapping.value.playerId, inPlayerId)
+  activeSwapping.value = null
+}
+
+const confirmCancelMatchId = ref(null)
+async function cancelMatch(matchId) {
+  await store.cancelMatch(matchId)
+  confirmCancelMatchId.value = null
+  activeSwapping.value = null
+}
+
 function playerName(id) {
   return store.getPlayer(id)?.name ?? id
 }
@@ -184,8 +212,14 @@ function formatWait(joinedAt) {
           <div class="text-xs text-blue-400 font-medium mb-2 uppercase tracking-wider">A 隊</div>
           <div class="flex justify-center gap-4">
             <div v-for="id in match.team1" :key="id"
-              class="bg-white rounded-xl px-4 py-2 shadow-sm border border-blue-100">
+              @click="isAdmin && toggleActiveSwap(match.id, id)"
+              class="bg-white rounded-xl px-4 py-2 shadow-sm border transition select-none"
+              :class="[
+                isAdmin ? 'cursor-pointer' : '',
+                isActiveSwapping(match.id, id) ? 'border-yellow-400 ring-2 ring-yellow-300 bg-yellow-50' : 'border-blue-100 hover:border-blue-300'
+              ]">
               <span class="font-semibold text-gray-800 text-sm">{{ playerName(id) }}</span>
+              <div class="text-xs text-yellow-500 mt-0.5" v-if="isActiveSwapping(match.id, id)">選排隊球員換入 ↓</div>
             </div>
           </div>
         </div>
@@ -199,18 +233,52 @@ function formatWait(joinedAt) {
         <div class="bg-orange-50 px-4 pt-6 pb-4 text-center">
           <div class="flex justify-center gap-4">
             <div v-for="id in match.team2" :key="id"
-              class="bg-white rounded-xl px-4 py-2 shadow-sm border border-orange-100">
+              @click="isAdmin && toggleActiveSwap(match.id, id)"
+              class="bg-white rounded-xl px-4 py-2 shadow-sm border transition select-none"
+              :class="[
+                isAdmin ? 'cursor-pointer' : '',
+                isActiveSwapping(match.id, id) ? 'border-yellow-400 ring-2 ring-yellow-300 bg-yellow-50' : 'border-orange-100 hover:border-orange-300'
+              ]">
               <span class="font-semibold text-gray-800 text-sm">{{ playerName(id) }}</span>
+              <div class="text-xs text-yellow-500 mt-0.5" v-if="isActiveSwapping(match.id, id)">選排隊球員換入 ↓</div>
             </div>
           </div>
           <div class="text-xs text-orange-400 font-medium mt-2 uppercase tracking-wider">B 隊</div>
         </div>
       </div>
-      <div v-if="isAdmin" class="px-4 pb-3">
+
+      <!-- Swap target picker -->
+      <div v-if="isAdmin && activeSwapping?.matchId === match.id" class="border-t border-yellow-200 bg-yellow-50 px-4 py-3">
+        <div class="text-xs text-gray-500 mb-2">選擇要換入的排隊球員：</div>
+        <div v-if="store.queue.length > 0" class="flex flex-wrap gap-2">
+          <button v-for="entry in store.queue" :key="entry.id"
+            @click="swapActivePlayer(match.id, entry.player_id)"
+            class="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-50 border border-gray-200 text-gray-700 hover:bg-gray-100 transition">
+            {{ playerName(entry.player_id) }}
+          </button>
+        </div>
+        <div v-else class="text-xs text-gray-400">排隊池無其他球員可換入</div>
+      </div>
+
+      <div v-if="isAdmin" class="px-4 pb-3 pt-3 flex gap-2">
         <button @click="store.endMatch(match.id)"
-          class="w-full py-2 text-sm font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 transition">
+          class="flex-1 py-2 text-sm font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 transition">
           結束球局
         </button>
+        <button v-if="confirmCancelMatchId !== match.id" @click="confirmCancelMatchId = match.id"
+          class="px-3 py-2 text-sm font-medium rounded-lg border border-red-200 text-red-500 hover:bg-red-50 active:bg-red-100 transition">
+          撤銷上場
+        </button>
+        <template v-else>
+          <button @click="cancelMatch(match.id)"
+            class="px-3 py-2 text-sm font-semibold rounded-lg bg-red-500 text-white hover:bg-red-600 transition">
+            確認撤銷
+          </button>
+          <button @click="confirmCancelMatchId = null"
+            class="px-3 py-2 text-sm font-medium rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition">
+            取消
+          </button>
+        </template>
       </div>
     </div>
   </section>
@@ -347,7 +415,18 @@ function formatWait(joinedAt) {
         {{ isAdmin && manualSelected.includes(entry.player_id) ? manualSelected.indexOf(entry.player_id) + 1 : index + 1 }}
       </span>
       <span class="flex-1 font-semibold text-gray-800 ml-2">{{ playerName(entry.player_id) }}</span>
-      <span class="text-xs text-gray-400 mr-3">{{ entry.session_games_played }} 場</span>
+      <div v-if="isAdmin" class="flex items-center gap-1 mr-3" @click.stop>
+        <button @click="store.updateQueueGamesPlayed(entry.player_id, entry.session_games_played - 1)"
+          class="w-5 h-5 flex items-center justify-center text-xs text-gray-400 border border-gray-200 rounded-full hover:bg-gray-50 transition leading-none">
+          −
+        </button>
+        <span class="text-xs text-gray-400 w-10 text-center">{{ entry.session_games_played }} 場</span>
+        <button @click="store.updateQueueGamesPlayed(entry.player_id, entry.session_games_played + 1)"
+          class="w-5 h-5 flex items-center justify-center text-xs text-gray-400 border border-gray-200 rounded-full hover:bg-gray-50 transition leading-none">
+          +
+        </button>
+      </div>
+      <span v-else class="text-xs text-gray-400 mr-3">{{ entry.session_games_played }} 場</span>
       <span class="text-xs text-gray-400 mr-2">{{ formatWait(entry.joined_at) }}</span>
       <button v-if="isAdmin" @click.stop="store.dequeue(entry.player_id)"
         class="text-gray-300 hover:text-red-400 transition text-lg leading-none ml-1" title="移除排隊">
