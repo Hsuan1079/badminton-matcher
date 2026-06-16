@@ -154,19 +154,33 @@ export const useBadmintonStore = defineStore('badminton', () => {
       return null
     }
 
+    // Optimistic update: remove players from local queue immediately so UI
+    // feels instant; realtime will reconcile if anything fails.
+    const optimisticMatch = { id: `optimistic-${Date.now()}`, team1, team2, court_number: courtNumber, started_at: new Date().toISOString(), ended_at: null }
+    matches.value = [...matches.value, optimisticMatch]
+    queue.value = queue.value.filter(e => ![...team1, ...team2].includes(e.player_id))
+
     const { data: match, error } = await supabase.from('matches').insert({
       team1,
       team2,
       court_number: courtNumber,
       ended_at: null,
     }).select().single()
-    if (error) { console.error(error); return null }
+    if (error) {
+      console.error(error)
+      // Rollback optimistic update
+      matches.value = matches.value.filter(m => m.id !== optimisticMatch.id)
+      return null
+    }
 
-    // Remove players from queue
-    const results = await Promise.all([...team1, ...team2].map(id =>
+    // Replace optimistic entry with real one from DB
+    matches.value = matches.value.map(m => m.id === optimisticMatch.id ? match : m)
+
+    // Remove players from queue in DB (fire and forget — UI already updated)
+    Promise.all([...team1, ...team2].map(id =>
       supabase.from('queue').delete().eq('player_id', id)
-    ))
-    results.forEach(({ error }) => { if (error) console.error(error) })
+    )).then(results => results.forEach(({ error }) => { if (error) console.error(error) }))
+
     return match
   }
 
@@ -185,17 +199,28 @@ export const useBadmintonStore = defineStore('badminton', () => {
       ).length + 1
     })
 
-    const { error: updateError } = await supabase.from('matches').update({ ended_at: new Date().toISOString() }).eq('id', matchId)
-    if (updateError) { console.error(updateError); return }
+    const endedAt = new Date().toISOString()
 
-    // Re-enqueue players in parallel
-    const results = await Promise.all([...match.team1, ...match.team2].map(playerId =>
+    // Optimistic update: mark match ended and re-add players to queue immediately
+    matches.value = matches.value.map(m => m.id === matchId ? { ...m, ended_at: endedAt } : m)
+    const newQueueEntries = [...match.team1, ...match.team2].map(playerId => ({
+      id: `optimistic-${playerId}-${Date.now()}`,
+      player_id: playerId,
+      session_games_played: gamesMap[playerId],
+      joined_at: new Date().toISOString(),
+    }))
+    queue.value = [...queue.value, ...newQueueEntries]
+
+    // Persist to DB in background
+    supabase.from('matches').update({ ended_at: endedAt }).eq('id', matchId)
+      .then(({ error }) => { if (error) console.error(error) })
+
+    Promise.all([...match.team1, ...match.team2].map(playerId =>
       supabase.from('queue').insert({
         player_id: playerId,
         session_games_played: gamesMap[playerId],
       })
-    ))
-    results.forEach(({ error }) => { if (error) console.error(error) })
+    )).then(results => results.forEach(({ error }) => { if (error) console.error(error) }))
   }
 
   // Cancel an active match entirely (e.g. started by mistake), returning all
