@@ -137,6 +137,10 @@ export const useBadmintonStore = defineStore('badminton', () => {
     return queue.value.some(e => e.player_id === playerId)
   }
 
+  function isInActiveMatch(playerId) {
+    return activeMatches.value.some(m => m.team1.includes(playerId) || m.team2.includes(playerId))
+  }
+
   // Admin override for a queued player's recorded game count (e.g. fixing a mis-click)
   async function updateQueueGamesPlayed(playerId, sessionGamesPlayed) {
     const value = Math.max(0, Math.trunc(sessionGamesPlayed))
@@ -358,7 +362,7 @@ export const useBadmintonStore = defineStore('badminton', () => {
     activeMatches, finishedMatches, activeCourts, availableCourts, candidatePool, canMatch,
     getPlayer, loadAll, subscribeRealtime,
     addPlayer, removePlayer,
-    enqueue, dequeue, isInQueue, updateQueueGamesPlayed,
+    enqueue, dequeue, isInQueue, isInActiveMatch, updateQueueGamesPlayed,
     startMatch, endMatch, cancelMatch, swapActiveMatchPlayer, startManualMatch,
     generateMatch, updateSettings,
   }

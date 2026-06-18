@@ -214,13 +214,26 @@ const tab = ref('players')
     >
       <span class="flex-1 font-semibold text-gray-800">{{ player.name }}</span>
       <span
-        v-if="store.isInQueue(player.id)"
+        v-if="store.isInActiveMatch(player.id)"
+        class="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full mr-3"
+      >
+        比賽中
+      </span>
+      <span
+        v-else-if="store.isInQueue(player.id)"
         class="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded-full mr-3"
       >
         排隊中
       </span>
       <button
-        v-if="!store.isInQueue(player.id)"
+        v-if="store.isInActiveMatch(player.id)"
+        disabled
+        class="text-xs px-3 py-1.5 bg-gray-50 text-gray-300 font-medium rounded-lg border border-gray-100 mr-2 cursor-not-allowed"
+      >
+        比賽中
+      </button>
+      <button
+        v-else-if="!store.isInQueue(player.id)"
         @click="store.enqueue(player.id)"
         class="text-xs px-3 py-1.5 bg-blue-50 text-blue-600 font-medium rounded-lg border border-blue-200 hover:bg-blue-100 transition mr-2"
       >
