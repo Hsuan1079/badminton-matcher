@@ -98,9 +98,9 @@ export const useBadmintonStore = defineStore('badminton', () => {
 
   async function clearAll() {
     await Promise.all([
-      supabase.from('queue').delete().neq('id', ''),
-      supabase.from('matches').delete().neq('id', ''),
-      supabase.from('players').delete().neq('id', ''),
+      supabase.from('queue').delete().not('id', 'is', null),
+      supabase.from('matches').delete().not('id', 'is', null),
+      supabase.from('players').delete().not('id', 'is', null),
     ])
     queue.value = []
     matches.value = []
