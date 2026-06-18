@@ -16,13 +16,6 @@ export const useBadmintonStore = defineStore('badminton', () => {
   const activeCourts = computed(() => activeMatches.value.length)
   const availableCourts = computed(() => settings.value.courts - activeCourts.value)
 
-  const candidatePool = computed(() => {
-    if (queue.value.length === 0) return []
-    const threshold = settings.value.similarity_threshold ?? 1
-    const minGames = Math.min(...queue.value.map(e => e.session_games_played))
-    const pool = queue.value.filter(e => e.session_games_played <= minGames + threshold)
-    return pool.length >= 4 ? pool : queue.value
-  })
   const canMatch = computed(() => queue.value.length >= 4 && availableCourts.value > 0)
 
   function getPlayer(id) {
@@ -103,6 +96,17 @@ export const useBadmintonStore = defineStore('badminton', () => {
     return true
   }
 
+  async function clearAll() {
+    await Promise.all([
+      supabase.from('queue').delete().neq('id', ''),
+      supabase.from('matches').delete().neq('id', ''),
+      supabase.from('players').delete().neq('id', ''),
+    ])
+    queue.value = []
+    matches.value = []
+    players.value = []
+  }
+
   // In-flight enqueue locks: prevents double-insert when the button is
   // pressed faster than the realtime update arrives.
   const enqueuingSet = new Set()
@@ -149,6 +153,10 @@ export const useBadmintonStore = defineStore('badminton', () => {
     return true
   }
 
+  // Snapshot of queue state before match started, keyed by matchId.
+  // Used by cancelMatch to restore players to their original queue position.
+  const queueSnapshots = new Map()
+
   // --- Match actions ---
   async function startMatch(team1, team2, courtNumber) {
     // Guard against double-booking: players already in an active match cannot start another
@@ -158,11 +166,19 @@ export const useBadmintonStore = defineStore('badminton', () => {
       return null
     }
 
+    // Snapshot queue entries before removing, so cancelMatch can restore them
+    const allIds = [...team1, ...team2]
+    const snapshot = queue.value.filter(e => allIds.includes(e.player_id)).map(e => ({
+      player_id: e.player_id,
+      session_games_played: e.session_games_played,
+      joined_at: e.joined_at,
+    }))
+
     // Optimistic update: remove players from local queue immediately so UI
     // feels instant; realtime will reconcile if anything fails.
     const optimisticMatch = { id: `optimistic-${Date.now()}`, team1, team2, court_number: courtNumber, started_at: new Date().toISOString(), ended_at: null }
     matches.value = [...matches.value, optimisticMatch]
-    queue.value = queue.value.filter(e => ![...team1, ...team2].includes(e.player_id))
+    queue.value = queue.value.filter(e => !allIds.includes(e.player_id))
 
     const { data: match, error } = await supabase.from('matches').insert({
       team1,
@@ -179,6 +195,7 @@ export const useBadmintonStore = defineStore('badminton', () => {
 
     // Replace optimistic entry with real one from DB
     matches.value = matches.value.map(m => m.id === optimisticMatch.id ? match : m)
+    queueSnapshots.set(match.id, snapshot)
 
     // Remove players from queue in DB (fire and forget — UI already updated)
     Promise.all([...team1, ...team2].map(id =>
@@ -228,16 +245,41 @@ export const useBadmintonStore = defineStore('badminton', () => {
   }
 
   // Cancel an active match entirely (e.g. started by mistake), returning all
-  // 4 players back to the queue as if it never happened.
+  // 4 players back to the queue with their original joined_at and games_played.
   async function cancelMatch(matchId) {
     const match = matches.value.find(m => m.id === matchId && m.ended_at === null)
     if (!match) return false
 
+    const snapshot = queueSnapshots.get(matchId)
+
+    // Optimistic update
+    matches.value = matches.value.filter(m => m.id !== matchId)
+    if (snapshot) {
+      queue.value = [...queue.value, ...snapshot.map(s => ({
+        id: `restore-${s.player_id}-${Date.now()}`,
+        ...s,
+      }))]
+    }
+
     const { error: deleteError } = await supabase.from('matches').delete().eq('id', matchId)
     if (deleteError) { console.error(deleteError); return false }
 
-    const results = await Promise.all([...match.team1, ...match.team2].map(playerId => enqueue(playerId)))
-    if (results.some(ok => !ok)) return false
+    // Restore players to queue with original values
+    if (snapshot) {
+      const results = await Promise.all(snapshot.map(s =>
+        supabase.from('queue').insert({
+          player_id: s.player_id,
+          session_games_played: s.session_games_played,
+          joined_at: s.joined_at,
+        })
+      ))
+      results.forEach(({ error }) => { if (error) console.error(error) })
+    } else {
+      // No snapshot (e.g. page was refreshed) — fallback to enqueue which recalculates
+      await Promise.all([...match.team1, ...match.team2].map(playerId => enqueue(playerId)))
+    }
+
+    queueSnapshots.delete(matchId)
     return true
   }
 
@@ -288,12 +330,13 @@ export const useBadmintonStore = defineStore('badminton', () => {
   }
 
   // --- Matching algorithm ---
+  const RANDOM_WINDOW = 1
+
   function generateMatch() {
     if (availableCourts.value <= 0) return { error: '目前無空場地' }
     if (queue.value.length < 4) return { error: '排隊人數不足（需要至少 4 人）' }
-    if (candidatePool.value.length < 4) return { error: '候選人數不足' }
 
-    const selected = shuffle(candidatePool.value.map(e => e.player_id)).slice(0, 4)
+    const selected = pickPlayers(queue.value, 4)
     const { team1, team2 } = splitTeams(selected)
 
     const usedCourts = new Set(activeMatches.value.map(m => m.court_number))
@@ -303,13 +346,32 @@ export const useBadmintonStore = defineStore('badminton', () => {
     return { team1, team2, courtNumber }
   }
 
-  function shuffle(arr) {
-    const a = [...arr]
-    for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]]
+  // Sort by joined_at (longest waiting first), take the top (count + RANDOM_WINDOW)
+  // players, then shuffle and pick `count`. This guarantees long-waiters are
+  // strongly favoured while keeping a small random element.
+  const FORCE_PICK_MINUTES = 30
+
+  function pickPlayers(pool, count) {
+    const now = Date.now()
+    const sorted = [...pool].sort((a, b) => new Date(a.joined_at) - new Date(b.joined_at))
+
+    // 等超過 30 分鐘的人直接鎖定，不參與隨機
+    const forced = sorted.filter(e => (now - new Date(e.joined_at).getTime()) / 60000 >= FORCE_PICK_MINUTES)
+    const guaranteed = forced.slice(0, count)
+    const remaining = count - guaranteed.length
+
+    if (remaining <= 0) {
+      return guaranteed.slice(0, count).map(e => e.player_id)
     }
-    return a
+
+    // 剩餘名額從非強制的人裡面用原本的隨機窗口挑
+    const rest = sorted.filter(e => !guaranteed.includes(e))
+    const shortlist = rest.slice(0, Math.min(remaining + RANDOM_WINDOW, rest.length))
+    for (let i = shortlist.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shortlist[i], shortlist[j]] = [shortlist[j], shortlist[i]]
+    }
+    return [...guaranteed.map(e => e.player_id), ...shortlist.slice(0, remaining).map(e => e.player_id)]
   }
 
   function getCourtHistory(playerId) {
@@ -359,9 +421,9 @@ export const useBadmintonStore = defineStore('badminton', () => {
 
   return {
     players, queue, matches, settings, loading,
-    activeMatches, finishedMatches, activeCourts, availableCourts, candidatePool, canMatch,
+    activeMatches, finishedMatches, activeCourts, availableCourts, canMatch,
     getPlayer, loadAll, subscribeRealtime,
-    addPlayer, removePlayer,
+    addPlayer, removePlayer, clearAll,
     enqueue, dequeue, isInQueue, isInActiveMatch, updateQueueGamesPlayed,
     startMatch, endMatch, cancelMatch, swapActiveMatchPlayer, startManualMatch,
     generateMatch, updateSettings,

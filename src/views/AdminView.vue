@@ -58,10 +58,10 @@ function enqueueAll() {
   store.players.forEach(p => store.enqueue(p.id))
 }
 
-// Clear all players
+// Clear all players, queue, and match history
 const confirmClear = ref(false)
-function clearAllPlayers() {
-  store.players.slice().forEach(p => store.removePlayer(p.id))
+async function clearAllPlayers() {
+  await store.clearAll()
   confirmClear.value = false
 }
 
